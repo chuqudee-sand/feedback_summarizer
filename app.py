@@ -1,12 +1,17 @@
+# app.py (Full Flask Script for Render Deployment)
+# This script processes data from Google Sheets, summarizes qualitative responses using Gemini API,
+# and returns summaries and recommendations. Deploy on Render with gunicorn.
+
 from flask import Flask, request, jsonify
 import pandas as pd
 import requests
-import json
+import os  # Added for environment variables (e.g., API key)
 
 app = Flask(__name__)
 
 # Gemini API configuration
-GEMINI_API_KEY = "AIzaSyAa89mJ2XHuRA4VnAR-KZODYi_Y7-wWvMc"  # Replace with your Gemini API key
+# Use environment variable for security (set in Render Dashboard > Environment Variables)
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY_HERE')  # Fallback for testing
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
 
 # Questions and short names
@@ -143,6 +148,5 @@ etc."""
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Required for App Engine
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=5000, debug=True)  # Debug for local testing; Render uses gunicorn
