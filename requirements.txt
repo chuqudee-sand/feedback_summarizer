@@ -1,5 +1,6 @@
 flask
 pandas
-requests==2.31.0
-gunicorn==20.1.0
+requests
+gunicorn
 numpy==1.26.4
+
