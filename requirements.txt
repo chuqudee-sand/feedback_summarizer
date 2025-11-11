@@ -2,5 +2,7 @@ flask
 pandas
 numpy==1.26.4
 Flask==2.3.2
-openai
+google-genai
 gunicorn==20.1.0
+pydantic
+
