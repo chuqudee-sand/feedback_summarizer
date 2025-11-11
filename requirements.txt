@@ -1,6 +1,6 @@
 flask
 pandas
 numpy==1.26.4
-requests
-google-genai
-gunicorn
+Flask==2.3.2
+google-genai==1.49.0
+gunicorn==20.1.0
