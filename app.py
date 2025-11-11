@@ -9,7 +9,7 @@ from typing import List
 
 app = Flask(__name__)
 
-API_KEY = os.getenv("GEMINI_API_KEY") 
+API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=API_KEY)
 
 QUESTIONS = [
@@ -47,7 +47,6 @@ class SummaryResponse(BaseModel):
 MAX_RESPONSES_PER_CHUNK = 20
 
 def chunk_list(lst, n):
-    """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
@@ -100,7 +99,7 @@ def call_gemini_api(prompt_text):
     )
     response = client.models.generate_content(
         model="gemini-1.5-flash",
-        contents=[types.Part.from_text(prompt_text)],
+        contents=[types.Part.from_text(text=prompt_text)],
         config=config,
     )
     return response.text.strip()
@@ -177,9 +176,5 @@ def summarize():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
-
-
