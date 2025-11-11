@@ -62,10 +62,12 @@ def summarize():
 
         for cohort, group in cohorts:
             for q in QUESTIONS:
+                if q["col"] not in group.columns:
+                    continue
                 responses = group[q["col"]].dropna().tolist()
                 if not responses:
                     continue
-
+                
                 # Clear and concise prompt asking for structured JSON string output
                 prompt_text = f"""
 You are an expert qualitative analyst summarizing survey data from cohort '{cohort}' for the question:
@@ -125,7 +127,7 @@ Responses:
                         q["short"],
                         "Parse Error",
                         f"Failed to parse JSON output: {e}",
-                        raw_text[:200]  # Truncate for brevity
+                        raw_text[:200]
                     ])
 
         return jsonify({"summary": summary_output, "recommendations": recommendations_output})
