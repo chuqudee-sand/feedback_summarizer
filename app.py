@@ -2,20 +2,17 @@ from flask import Flask, request, jsonify
 import pandas as pd
 import json
 import os
-from openai import OpenAI
+from google import genai
+from pydantic import BaseModel, ValidationError
 from typing import List
 
 app = Flask(__name__)
 
-# Load DeepSeek API key from environment variable
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-if not DEEPSEEK_API_KEY:
-    raise RuntimeError("DEEPSEEK_API_KEY environment variable not set")
+# Initialize Gemini client with API key from env variable
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Initialize OpenAI client using DeepSeek's base URL for API compatibility
-client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com/v1")
-
-# Full questions list (must match exact Google Sheet columns)
+# Define full questions with exact header names on your sheet
 QUESTIONS = [
     {
         "full": "Briefly explain your rating. What aspects of the program influenced your score the most?",
@@ -39,6 +36,16 @@ QUESTIONS = [
     }
 ]
 
+# Pydantic models for validating structured JSON output
+class Theme(BaseModel):
+    theme: str
+    summary: str
+    samples: List[str]
+
+class SummaryResponse(BaseModel):
+    themes: List[Theme]
+    recommendations: List[str]
+
 @app.route("/summarize", methods=["POST"])
 def summarize():
     try:
@@ -47,32 +54,30 @@ def summarize():
             return jsonify({"error": "Invalid data format"}), 400
 
         df = pd.DataFrame(data["rows"], columns=data["headers"])
-        cohorts = df.groupby("Cohort")
 
         summary_output = []
         recommendations_output = []
 
+        cohorts = df.groupby("Cohort")
+
         for cohort, group in cohorts:
             for q in QUESTIONS:
-                if q["col"] not in group.columns:
-                    continue
-                
                 responses = group[q["col"]].dropna().tolist()
                 if not responses:
                     continue
 
-                prompt = f"""
-You are an expert qualitative analyst summarizing survey responses from cohort '{cohort}' for the question:
+                # Clear and concise prompt asking for structured JSON string output
+                prompt_text = f"""
+You are an expert qualitative analyst summarizing survey data from cohort '{cohort}' for the question:
 
 \"{q['full']}\"
 
-Identify 3 to 5 main themes. For each theme, provide:
-- A concise theme title
-- A summary including approximately how many respondents mentioned it
-- 3 to 4 representative sample quotes verbatim
+Identify 3-5 main themes. For each, provide:
+- theme title
+- summary including approx respondent count
+- 3-4 verbatim sample responses
 
-Respond ONLY with a valid JSON string matching this schema:
-
+Output ONLY a JSON string with this schema:
 {{
   "themes": [
     {{
@@ -88,54 +93,45 @@ Responses:
 {'\n---\n'.join(responses)}
 """
 
-                completion = client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[
-                        {"role": "system", "content": "You are an expert qualitative analyst."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=1024,
+                # Call Gemini API without response_mime_type (fallback for compatibility)
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[{"text": prompt_text}]
                 )
+                raw_text = response.text.strip()
 
-                raw_text = completion.choices[0].message.content.strip()
-
+                # Try parse JSON string output manually
                 try:
-                    parsed = json.loads(raw_text)
-                    themes = parsed.get("themes", [])
-                    recs = parsed.get("recommendations", [])
+                    parsed_json = json.loads(raw_text)
+                    summary_resp = SummaryResponse.parse_obj(parsed_json)
 
-                    for theme in themes:
+                    for theme in summary_resp.themes:
                         summary_output.append([
                             cohort,
                             q["full"],
                             q["short"],
-                            theme.get("theme", ""),
-                            theme.get("summary", ""),
-                            "\n".join(theme.get("samples", []))
+                            theme.theme,
+                            theme.summary,
+                            "\n".join(theme.samples)
                         ])
 
-                    for rec in recs:
+                    for rec in summary_resp.recommendations:
                         recommendations_output.append([cohort, rec])
 
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, ValidationError) as e:
                     summary_output.append([
                         cohort,
                         q["full"],
                         q["short"],
                         "Parse Error",
-                        "Failed to parse JSON output",
-                        raw_text[:200]
+                        f"Failed to parse JSON output: {e}",
+                        raw_text[:200]  # Truncate for brevity
                     ])
 
-        return jsonify({
-            "summary": summary_output,
-            "recommendations": recommendations_output
-        })
+        return jsonify({"summary": summary_output, "recommendations": recommendations_output})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
