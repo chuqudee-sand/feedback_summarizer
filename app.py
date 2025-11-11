@@ -98,7 +98,7 @@ def call_gemini_api(prompt_text):
         temperature=0.7,
     )
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.0-flash",
         contents=[types.Part.from_text(text=prompt_text)],
         config=config,
     )
@@ -178,3 +178,4 @@ def summarize():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
