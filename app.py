@@ -23,9 +23,9 @@ QUESTIONS = [
         "col": "Briefly explain your rating. What aspects of the program influenced your score the most?"
     },
     {
-        "full": "Optional: Please share any additional comments or suggestions you have for improving the AiCE program.",
+        "full": "OPTIONAL: Please share any additional comments or suggestions you have for improving the AiCE program.",
         "short": "learning experience",
-        "col": "Optional: Please share any additional comments or suggestions you have for improving the AiCE program."
+        "col": "OPTIONAL: Please share any additional comments or suggestions you have for improving the AiCE program."
     },
     {
         "full": "OPTIONAL: What additional support or resources would you like to see introduced to enhance your experience in the program further? [open-ended]",
@@ -138,3 +138,4 @@ Responses:
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
