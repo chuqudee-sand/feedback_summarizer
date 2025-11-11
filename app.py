@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import pandas as pd
 import json
+import os
 import math
 from google import genai
 from pydantic import BaseModel, ValidationError
@@ -8,7 +9,7 @@ from typing import List
 
 app = Flask(__name__)
 
-API_KEY = "YOUR_API_KEY"  # Replace with your actual key or use environment variable
+API_KEY = os.getenv("GEMINI_API_KEY")  
 client = genai.Client(api_key=API_KEY)
 
 # Questions with exact Google Sheet column names
@@ -19,9 +20,9 @@ QUESTIONS = [
         "col": "Briefly explain your rating. What aspects of the program influenced your score the most?"
     },
     {
-        "full": "Optional: Please share any additional comments or suggestions you have for improving the AiCE program.",
+        "full": "OPTIONAL: Please share any additional comments or suggestions you have for improving the AiCE program.",
         "short": "learning experience",
-        "col": "Optional: Please share any additional comments or suggestions you have for improving the AiCE program."
+        "col": "OPTIONAL: Please share any additional comments or suggestions you have for improving the AiCE program."
     },
     {
         "full": "OPTIONAL: What additional support or resources would you like to see introduced to enhance your experience in the program further? [open-ended]",
@@ -191,3 +192,4 @@ def summarize():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
