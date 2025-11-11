@@ -1,11 +1,7 @@
 from flask import Flask, request, jsonify
 import pandas as pd
-import json
-import os
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, ValidationError
-from typing import List
 
 app = Flask(__name__)
 
@@ -35,15 +31,6 @@ QUESTIONS = [
     }
 ]
 
-class Theme(BaseModel):
-    theme: str
-    summary: str
-    samples: List[str]
-
-class SummaryResponse(BaseModel):
-    themes: List[Theme]
-    recommendations: List[str]
-
 MAX_RESPONSES_PER_CHUNK = 20
 
 def chunk_list(lst, n):
@@ -61,20 +48,9 @@ Identify 3 to 5 main themes. For each theme, provide:
 - A summary including approximately how many respondents mentioned it
 - 3 to 4 representative sample quotes verbatim
 
-Output **only** a valid JSON string matching this schema exactly (no extra text):
+Return your summary in plain text only (no JSON).
 
-{{
-  "themes": [
-    {{
-      "theme": "string",
-      "summary": "string",
-      "samples": ["string"]
-    }}
-  ],
-  "recommendations": []
-}}
-
-Responses (separate each by "---"):
+Responses (each separated by "---"):
 
 {'\n---\n'.join(responses)}
 """
@@ -84,7 +60,7 @@ def generate_recommendations_prompt(cohort, all_feedback):
     prompt = f"""
 Based on the following open-ended feedback from cohort '{cohort}', generate 3 to 4 numbered, concise, actionable recommendations to improve the AiCE program.
 
-Return ONLY the recommendations as a JSON array of strings (e.g. ["rec 1", "rec 2", ...]) without any other commentary.
+Return your recommendations in plain text only (no JSON).
 
 Feedback (each separated by ---):
 
@@ -114,8 +90,8 @@ def summarize():
         df = pd.DataFrame(data["rows"], columns=data["headers"])
         cohorts = df.groupby("Cohort")
 
-        summary_output = []
-        recommendations_output = []
+        summary_texts = []
+        recommendation_texts = []
 
         for cohort, group in cohorts:
             all_text_for_recs = []
@@ -128,54 +104,30 @@ def summarize():
                     continue
                 all_text_for_recs.extend(responses)
 
+                # Chunk inputs
                 chunks = list(chunk_list(responses, MAX_RESPONSES_PER_CHUNK))
-                themes_accum = []
-
                 for chunk in chunks:
                     prompt_text = generate_summary_prompt(cohort, q["full"], chunk)
                     raw_text = call_gemini_api(prompt_text)
-
-                    try:
-                        parsed_json = json.loads(raw_text)
-                        summary_resp = SummaryResponse.parse_obj(parsed_json)
-                        themes_accum.extend(summary_resp.themes)
-                    except (json.JSONDecodeError, ValidationError) as e:
-                        summary_output.append([
-                            cohort, q["full"], q["short"],
-                            "Parse Error",
-                            f"Failed to parse JSON output: {e}",
-                            raw_text[:200]
-                        ])
-                        break
-
-                for theme in themes_accum[:3]:
-                    summary_output.append([
-                        cohort,
-                        q["full"],
-                        q["short"],
-                        theme.theme,
-                        theme.summary,
-                        "\n".join(theme.samples)
-                    ])
+                    summary_texts.append({
+                        "cohort": cohort,
+                        "question": q["full"],
+                        "question_short": q["short"],
+                        "summary": raw_text
+                    })
 
             if all_text_for_recs:
                 rec_prompt = generate_recommendations_prompt(cohort, all_text_for_recs)
                 raw_rec_text = call_gemini_api(rec_prompt)
+                recommendation_texts.append({
+                    "cohort": cohort,
+                    "recommendations": raw_rec_text
+                })
 
-                try:
-                    recs = json.loads(raw_rec_text)
-                    if not isinstance(recs, list):
-                        raise ValueError("Recommendations response is not a list")
-                    for rec in recs:
-                        recommendations_output.append([cohort, rec])
-                except Exception as e:
-                    recommendations_output.append([cohort, f"Failed to parse recommendations: {e}"])
-
-        return jsonify({"summary": summary_output, "recommendations": recommendations_output})
+        return jsonify({"summary": summary_texts, "recommendations": recommendation_texts})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
