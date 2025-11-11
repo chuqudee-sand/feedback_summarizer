@@ -1,14 +1,21 @@
 from flask import Flask, request, jsonify
 import pandas as pd
-from google import genai
-from google.genai import types
+import json
 import os
+from openai import OpenAI
+from typing import List
 
 app = Flask(__name__)
 
-API_KEY = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=API_KEY)
+# Load DeepSeek API key from environment variable
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+if not DEEPSEEK_API_KEY:
+    raise RuntimeError("DEEPSEEK_API_KEY environment variable not set")
 
+# Initialize OpenAI client using DeepSeek's base URL for API compatibility
+client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com/v1")
+
+# Full questions list (must match exact Google Sheet columns)
 QUESTIONS = [
     {
         "full": "Briefly explain your rating. What aspects of the program influenced your score the most?",
@@ -16,9 +23,9 @@ QUESTIONS = [
         "col": "Briefly explain your rating. What aspects of the program influenced your score the most?"
     },
     {
-        "full": "OPTIONAL: Please share any additional comments or suggestions you have for improving the AiCE program.",
+        "full": "Optional: Please share any additional comments or suggestions you have for improving the AiCE program.",
         "short": "learning experience",
-        "col": "OPTIONAL: Please share any additional comments or suggestions you have for improving the AiCE program."
+        "col": "Optional: Please share any additional comments or suggestions you have for improving the AiCE program."
     },
     {
         "full": "OPTIONAL: What additional support or resources would you like to see introduced to enhance your experience in the program further? [open-ended]",
@@ -32,104 +39,102 @@ QUESTIONS = [
     }
 ]
 
-MAX_RESPONSES_PER_CHUNK = 20
+@app.route("/summarize", methods=["POST"])
+def summarize():
+    try:
+        data = request.get_json()
+        if not data or "rows" not in data or "headers" not in data:
+            return jsonify({"error": "Invalid data format"}), 400
 
-def chunk_list(lst, n):
-    for i in range(0, len(lst), n):
-        yield lst[i:i + n]
+        df = pd.DataFrame(data["rows"], columns=data["headers"])
+        cohorts = df.groupby("Cohort")
 
-def generate_summary_prompt(cohort, question_full, responses):
-    prompt = f"""
+        summary_output = []
+        recommendations_output = []
+
+        for cohort, group in cohorts:
+            for q in QUESTIONS:
+                if q["col"] not in group.columns:
+                    continue
+                
+                responses = group[q["col"]].dropna().tolist()
+                if not responses:
+                    continue
+
+                prompt = f"""
 You are an expert qualitative analyst summarizing survey responses from cohort '{cohort}' for the question:
 
-\"{question_full}\"
+\"{q['full']}\"
 
 Identify 3 to 5 main themes. For each theme, provide:
 - A concise theme title
 - A summary including approximately how many respondents mentioned it
 - 3 to 4 representative sample quotes verbatim
 
-Return your summary in plain text only (no JSON).
+Respond ONLY with a valid JSON string matching this schema:
 
-Responses (each separated by "---"):
+{{
+  "themes": [
+    {{
+      "theme": "string",
+      "summary": "string",
+      "samples": ["string"]
+    }}
+  ],
+  "recommendations": ["string"]
+}}
 
+Responses:
 {'\n---\n'.join(responses)}
 """
-    return prompt
 
-def generate_recommendations_prompt(cohort, all_feedback):
-    prompt = f"""
-Based on the following open-ended feedback from cohort '{cohort}', generate 3 to 4 numbered, concise, actionable recommendations to improve the AiCE program.
+                completion = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[
+                        {"role": "system", "content": "You are an expert qualitative analyst."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=1024,
+                )
 
-Return your recommendations in plain text only (no JSON).
+                raw_text = completion.choices[0].message.content.strip()
 
-Feedback (each separated by ---):
+                try:
+                    parsed = json.loads(raw_text)
+                    themes = parsed.get("themes", [])
+                    recs = parsed.get("recommendations", [])
 
-{'\n---\n'.join(all_feedback)}
-"""
-    return prompt
+                    for theme in themes:
+                        summary_output.append([
+                            cohort,
+                            q["full"],
+                            q["short"],
+                            theme.get("theme", ""),
+                            theme.get("summary", ""),
+                            "\n".join(theme.get("samples", []))
+                        ])
 
-def call_gemini_api(prompt_text):
-    config = types.GenerateContentConfig(
-        max_output_tokens=1024,
-        temperature=0.7,
-    )
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=[types.Part.from_text(text=prompt_text)],
-        config=config,
-    )
-    return response.text.strip()
+                    for rec in recs:
+                        recommendations_output.append([cohort, rec])
 
-@app.route("/summarize", methods=["POST"])
-def summarize():
-    try:
-        data = request.get_json()
-        if not data or "rows" not in data or "headers" not in data:
-            return jsonify({"error": "Invalid input data format"}), 400
+                except json.JSONDecodeError:
+                    summary_output.append([
+                        cohort,
+                        q["full"],
+                        q["short"],
+                        "Parse Error",
+                        "Failed to parse JSON output",
+                        raw_text[:200]
+                    ])
 
-        df = pd.DataFrame(data["rows"], columns=data["headers"])
-        cohorts = df.groupby("Cohort")
-
-        summary_texts = []
-        recommendation_texts = []
-
-        for cohort, group in cohorts:
-            all_text_for_recs = []
-
-            for q in QUESTIONS:
-                if q["col"] not in group.columns:
-                    continue
-                responses = group[q["col"]].dropna().tolist()
-                if not responses:
-                    continue
-                all_text_for_recs.extend(responses)
-
-                # Chunk inputs
-                chunks = list(chunk_list(responses, MAX_RESPONSES_PER_CHUNK))
-                for chunk in chunks:
-                    prompt_text = generate_summary_prompt(cohort, q["full"], chunk)
-                    raw_text = call_gemini_api(prompt_text)
-                    summary_texts.append({
-                        "cohort": cohort,
-                        "question": q["full"],
-                        "question_short": q["short"],
-                        "summary": raw_text
-                    })
-
-            if all_text_for_recs:
-                rec_prompt = generate_recommendations_prompt(cohort, all_text_for_recs)
-                raw_rec_text = call_gemini_api(rec_prompt)
-                recommendation_texts.append({
-                    "cohort": cohort,
-                    "recommendations": raw_rec_text
-                })
-
-        return jsonify({"summary": summary_texts, "recommendations": recommendation_texts})
+        return jsonify({
+            "summary": summary_output,
+            "recommendations": recommendations_output
+        })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
