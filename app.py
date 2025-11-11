@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import pandas as pd
 from google import genai
 from google.genai import types
+import os
 
 app = Flask(__name__)
 
@@ -131,3 +132,4 @@ def summarize():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
