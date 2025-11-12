@@ -3,7 +3,6 @@ import pandas as pd
 import json
 import os
 from google import genai
-from pydantic import BaseModel, ValidationError
 from typing import List
 
 app = Flask(__name__)
@@ -36,15 +35,15 @@ QUESTIONS = [
     }
 ]
 
-# Pydantic models for validating structured JSON output
-class Theme(BaseModel):
-    theme: str
-    summary: str
-    samples: List[str]
-
-class SummaryResponse(BaseModel):
-    themes: List[Theme]
-    recommendations: List[str]
+def parse_plain_text_summary(text):
+    # This regex matches blocks starting with Theme: followed by summary lines until next Theme or end
+    pattern = r"(Theme:.*?)(?=(?:Theme:|$))"
+    matches = re.findall(pattern, text, flags=re.DOTALL|re.IGNORECASE)
+    summaries = []
+    for block in matches:
+        clean_text = block.strip().replace("\n", " ")
+        summaries.append(clean_text)
+    return "\n\n".join(summaries)
 
 @app.route("/summarize", methods=["POST"])
 def summarize():
@@ -56,7 +55,6 @@ def summarize():
         df = pd.DataFrame(data["rows"], columns=data["headers"])
 
         summary_output = []
-        recommendations_output = []
 
         cohorts = df.groupby("Cohort")
 
@@ -67,70 +65,44 @@ def summarize():
                 responses = group[q["col"]].dropna().tolist()
                 if not responses:
                     continue
-                
-                # Clear and concise prompt asking for structured JSON string output
+
                 prompt_text = f"""
-You are an expert qualitative analyst summarizing survey data from cohort '{cohort}' for the question:
+You are an expert qualitative analyst summarizing survey responses from cohort '{cohort}' for the question:
 
 \"{q['full']}\"
 
-Identify 3-5 main themes. For each, provide:
-- theme title
-- summary including approx respondent count
-- 3-4 verbatim sample responses
+Identify 3-5 main themes. For each theme, provide:
+- Theme title, starting with 'Theme:'
+- A concise summary, starting with 'summary:'
 
-Output ONLY a JSON string with this schema:
-{{
-  "themes": [
-    {{
-      "theme": "string",
-      "summary": "string",
-      "samples": ["string"]
-    }}
-  ],
-  "recommendations": ["string"]
-}}
+Output as plain text using the format:
+
+Theme: [theme title]
+summary: [summary text]
 
 Responses:
 {'\n---\n'.join(responses)}
 """
 
-                # Call Gemini API without response_mime_type (fallback for compatibility)
                 response = client.models.generate_content(
                     model="gemini-2.0-flash",
                     contents=[{"text": prompt_text}]
                 )
                 raw_text = response.text.strip()
 
-                # Try parse JSON string output manually
-                try:
-                    parsed_json = json.loads(raw_text)
-                    summary_resp = SummaryResponse.parse_obj(parsed_json)
+                summary_text = parse_plain_text_summary(raw_text)
 
-                    for theme in summary_resp.themes:
-                        summary_output.append([
-                            cohort,
-                            q["full"],
-                            q["short"],
-                            theme.theme,
-                            theme.summary,
-                            "\n".join(theme.samples)
-                        ])
+                if not summary_text:
+                    summary_text = "No summary generated."
 
-                    for rec in summary_resp.recommendations:
-                        recommendations_output.append([cohort, rec])
+                summary_output.append([
+                    cohort,
+                    q["full"],
+                    q["short"],
+                    summary_text
+                ])
 
-                except (json.JSONDecodeError, ValidationError) as e:
-                    summary_output.append([
-                        cohort,
-                        q["full"],
-                        q["short"],
-                        "Parse Error",
-                        f"Failed to parse JSON output: {e}",
-                        raw_text[:200]
-                    ])
-
-        return jsonify({"summary": summary_output, "recommendations": recommendations_output})
+        return jsonify({"summary": summary_output})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
