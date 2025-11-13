@@ -73,13 +73,14 @@ You are an expert qualitative analyst summarizing survey responses from cohort '
 \"{q['full']}\"
 
 Identify 3-5 main themes. For each theme, provide:
-- Theme title, starting with 'Theme:'
-- A concise summary, starting with 'summary:'
+- The approximate number of participants or responses mentioning it, stated explicitly at the start of the summary (e.g., '35 participants expressed...')
+- A concise theme title, introduced after 'Theme:'
+- A well-structured summary starting with 'summary:' that elaborates on the theme with the count included
 
-Output as plain text using the format:
+Please output in plain text using the format:
 
 Theme: [theme title]
-summary: [summary text]
+summary: [summary text including number of responses]
 
 Responses:
 {'\n---\n'.join(responses)}
@@ -110,4 +111,5 @@ Responses:
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
