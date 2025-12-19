@@ -73,11 +73,29 @@ Responses:
 {'\n---\n'.join(responses)}
 """
 
-                response = client.models.generate_content(
-                    model="gemini-1.5-flash-latest",
-                    contents=[{"text": prompt_text}]
-                )
-                raw_text = response.text.strip()
+                # 🔄 AUTOMATIC RETRY LOGIC FOR QUOTA ERRORS
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        response = client.models.generate_content(
+                            model="gemini-2.0-flash",
+                            contents=[{"text": prompt_text}]
+                        )
+                        raw_text = response.text.strip()
+                        break  # Success! Exit retry loop
+                        
+                    except Exception as api_error:
+                        error_str = str(api_error).upper()
+                        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA" in error_str:
+                            wait_time = (2 ** attempt) + 3  # 5s, 11s, 19s exponential backoff
+                            print(f"Quota hit for {cohort}/{col}. Retrying in {wait_time}s... (attempt {attempt+1}/{max_retries})")
+                            time.sleep(wait_time)
+                            if attempt == max_retries - 1:
+                                print(f"Failed after {max_retries} retries for {cohort}/{col}")
+                                raw_text = "API quota exhausted after retries"
+                        else:
+                            # Non-quota error - re-raise immediately
+                            raise api_error
 
                 summary_text = parse_plain_text_summary(raw_text)
                 if not summary_text:
@@ -97,6 +115,7 @@ Responses:
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
