@@ -74,7 +74,7 @@ Responses:
 """
 
                 response = client.models.generate_content(
-                    model="gemini-1.5-flash",
+                    model="gemini-1.5-flash-exp-0924",
                     contents=[{"text": prompt_text}]
                 )
                 raw_text = response.text.strip()
@@ -97,4 +97,5 @@ Responses:
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
