@@ -3,7 +3,7 @@ import pandas as pd
 import json
 import os
 import re
-import time
+import time  # <-- FIXED: Added time import to prevent retry error
 from google import genai
 
 app = Flask(__name__)
@@ -28,6 +28,7 @@ def summarize():
             return jsonify({"error": "Invalid data format"}), 400
 
         question_short_map = data.get("questionShortMap", {})
+        original_total = data.get("originalTotal", len(data["rows"])) # Get total before sampling
         headers = data["headers"]
         cohort_col = None
         for h in headers:
@@ -55,10 +56,16 @@ def summarize():
 
                 question_short = question_short_map.get(col, col)
 
+                # NEW LOGIC: Tell AI if it's reading a sample
+                sample_notice = ""
+                if original_total > len(responses):
+                    sample_notice = f"\nNOTE: The original dataset had {original_total} responses. You are analyzing a statistically representative random sample of {len(responses)} responses. Please mention that this summary is based on a representative sample of {len(responses)} responses at the beginning of your summary."
+
                 prompt_text = f"""
 You are an expert qualitative analyst summarizing survey responses from cohort '{cohort}' for the question:
 
 \"{col}\"
+{sample_notice}
 
 Identify 3-5 main themes. For each theme, provide:
 - The approximate number of participants or responses mentioning it, stated explicitly at the start of the summary (e.g., '35 learners expressed...')
@@ -90,7 +97,7 @@ Responses:
                         if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA" in error_str:
                             wait_time = (2 ** attempt) + 3  # 5s, 11s, 19s exponential backoff
                             print(f"Quota hit for {cohort}/{col}. Retrying in {wait_time}s... (attempt {attempt+1}/{max_retries})")
-                            time.sleep(wait_time)
+                            time.sleep(wait_time) # <-- Now works perfectly since we imported time!
                             if attempt == max_retries - 1:
                                 print(f"Failed after {max_retries} retries for {cohort}/{col}")
                                 raw_text = "API quota exhausted after retries"
@@ -116,8 +123,3 @@ Responses:
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
-
-
-
-
