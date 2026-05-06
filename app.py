@@ -1,125 +1,118 @@
-from flask import Flask, request, jsonify
-import pandas as pd
-import json
 import os
-import re
-import time  # <-- FIXED: Added time import to prevent retry error
-from google import genai
+import json
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from supabase import create_client, Client
+import google.generativeai as genai
+from dotenv import load_dotenv
 
-app = Flask(__name__)
+load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=GEMINI_API_KEY)
+app = FastAPI()
 
-def parse_plain_text_summary(text):
-    pattern = r"(Theme:.*?)(?=(?:Theme:|$))"
-    matches = re.findall(pattern, text, flags=re.DOTALL | re.IGNORECASE)
-    summaries = []
-    for block in matches:
-        clean_text = block.strip().replace("\n", " ")
-        summaries.append(clean_text)
-    return "\n\n".join(summaries)
+# Enable CORS so your Vercel frontend can trigger this
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production, replace with your Vercel URL
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.route("/summarize", methods=["POST"])
-def summarize():
+# Initialize Clients
+supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+class SummaryRequest(BaseModel):
+    program: str
+    activeTab: str
+    startDate: str
+    endDate: str
+    activeEvent: str
+    reportPeriod: str
+
+def process_ai_summary(req: SummaryRequest):
+    """The heavy lifting logic moved from page.tsx to Python"""
     try:
-        data = request.get_json()
-        if not data or "rows" not in data or "headers" not in data:
-            return jsonify({"error": "Invalid data format"}), 400
+        raw_text = ""
+        
+        # 1. Fetch Data based on Tab (using your _text column logic)
+        if req.activeTab in ['onboarding', 'eop']:
+            table = 'survey_onboarding' if req.activeTab == 'onboarding' else 'survey_eop'
+            response = supabase.table(table).select("*")\
+                .eq('program', req.program)\
+                .gte('created_at', req.startDate)\
+                .lte('created_at', req.endDate)\
+                .execute()
+            
+            for row in response.data:
+                # Target the specific open-ended columns you identified
+                for col in ['unclear_aspects_text', 'additional_feedback_text', 'missing_info_text', 'additional_support_resources_text']:
+                    if row.get(col):
+                        raw_text += f"Feedback: {row[col]}\n"
 
-        question_short_map = data.get("questionShortMap", {})
-        original_total = data.get("originalTotal", len(data["rows"])) # Get total before sampling
-        headers = data["headers"]
-        cohort_col = None
-        for h in headers:
-            if "cohort" in h.lower():
-                cohort_col = h
-                break
-        if cohort_col is None:
-            return jsonify({"error": "Cohort column not found"}), 400
+        elif req.activeTab in ['community', 'support']:
+            response = supabase.table('survey_events').select("*")\
+                .eq('program', req.program)\
+                .eq('event_name_date', req.activeEvent)\
+                .execute()
+            
+            for row in response.data:
+                # Target event-specific open-ended columns
+                for col in ['improvement_suggestion_text', 'challenging_topic_text']:
+                    if row.get(col):
+                        raw_text += f"Feedback: {row[col]}\n"
 
-        df = pd.DataFrame(data["rows"], columns=headers)
-        summary_output = []
+        if len(raw_text.strip()) < 10:
+            return
 
-        cohorts = df.groupby(cohort_col)
+        # 2. Call Gemini 1.5 Flash
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = f"""
+        You are an expert Data Analyst for an educational program. Analyze the following learner feedback.
+        Identify the 3 to 4 most prominent themes. Return the result strictly as a JSON array of objects.
+        Each object must have these exactly matching keys:
+        - "theme_title": A short 2-4 word title for the theme.
+        - "summary_text": A 1-sentence summary of what learners are saying.
+        - "response_count": Your estimated number of mentions for this theme (integer).
+        - "question_short": A short category like "General Feedback" or "Improvement".
 
-        for cohort, group in cohorts:
-            for col in headers:
-                if col == cohort_col:
-                    continue
-                if col not in group.columns:
-                    continue
+        Feedback to analyze:
+        {raw_text}
+        """
 
-                responses = group[col].dropna().tolist()
-                if not responses:
-                    continue
+        result = model.generate_content(prompt)
+        # Clean the response in case Gemini includes markdown backticks
+        clean_json = result.text.replace('```json', '').replace('```', '').strip()
+        parsed_themes = json.loads(clean_json)
 
-                question_short = question_short_map.get(col, col)
+        # 3. Prepare rows for Supabase
+        insert_rows = []
+        for theme in parsed_themes:
+            insert_rows.append({
+                "program": req.program,
+                "tab_name": req.activeTab,
+                "question_short": theme.get("question_short", "General"),
+                "theme_title": theme.get("theme_title"),
+                "response_count": theme.get("response_count", 1),
+                "summary_text": theme.get("summary_text"),
+                "report_period": req.reportPeriod,
+                "event_name_date": req.activeEvent if req.activeTab in ['community', 'support'] else None
+            })
 
-                # NEW LOGIC: Tell AI if it's reading a sample
-                sample_notice = ""
-                if original_total > len(responses):
-                    sample_notice = f"\nNOTE: The original dataset had {original_total} responses. You are analyzing a statistically representative random sample of {len(responses)} responses. Please mention that this summary is based on a representative sample of {len(responses)} responses at the beginning of your summary."
-
-                prompt_text = f"""
-You are an expert qualitative analyst summarizing survey responses from cohort '{cohort}' for the question:
-
-\"{col}\"
-{sample_notice}
-
-Identify 3-5 main themes. For each theme, provide:
-- The approximate number of participants or responses mentioning it, stated explicitly at the start of the summary (e.g., '35 learners expressed...')
-- A concise theme title, introduced after 'Theme:'
-- A well-structured summary starting with 'summary:' that elaborates on the theme with the count included
-
-Please output in plain text using the format:
-
-Theme: [theme title]
-summary: [summary text including number of responses]
-
-Responses:
-{'\n---\n'.join(responses)}
-"""
-
-                # 🔄 AUTOMATIC RETRY LOGIC FOR QUOTA ERRORS
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        response = client.models.generate_content(
-                            model="gemini-2.0-flash",
-                            contents=[{"text": prompt_text}]
-                        )
-                        raw_text = response.text.strip()
-                        break  # Success! Exit retry loop
-                        
-                    except Exception as api_error:
-                        error_str = str(api_error).upper()
-                        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA" in error_str:
-                            wait_time = (2 ** attempt) + 3  # 5s, 11s, 19s exponential backoff
-                            print(f"Quota hit for {cohort}/{col}. Retrying in {wait_time}s... (attempt {attempt+1}/{max_retries})")
-                            time.sleep(wait_time) # <-- Now works perfectly since we imported time!
-                            if attempt == max_retries - 1:
-                                print(f"Failed after {max_retries} retries for {cohort}/{col}")
-                                raw_text = "API quota exhausted after retries"
-                        else:
-                            # Non-quota error - re-raise immediately
-                            raise api_error
-
-                summary_text = parse_plain_text_summary(raw_text)
-                if not summary_text:
-                    summary_text = "No summary generated."
-
-                summary_output.append([
-                    cohort,
-                    col,
-                    question_short,
-                    summary_text
-                ])
-
-        return jsonify({"summary": summary_output})
+        # 4. Save to Supabase
+        supabase.table("ai_thematic_summaries").insert(insert_rows).execute()
+        print(f"Successfully saved summary for {req.program}")
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"Error processing AI summary: {str(e)}")
+
+@app.post("/summarize")
+async def trigger_summary(req: SummaryRequest, background_tasks: BackgroundTasks):
+    # We add the task to background so the API returns 200 immediately
+    background_tasks.add_task(process_ai_summary, req)
+    return {"status": "processing", "message": "The AI is working in the background."}
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
