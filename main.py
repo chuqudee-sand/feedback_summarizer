@@ -18,7 +18,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with your Vercel URL e.g. ["https://your-app.vercel.app"]
+    allow_origins=["https://alx-feedback-engine.vercel.app"],  # Replace with your Vercel URL e.g. ["https://your-app.vercel.app"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
