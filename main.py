@@ -75,27 +75,61 @@ def format_event_name_date(topic: str, start_time: str) -> str:
     return f"{topic} - {date_str}"
 
 
-def detect_program_and_event_type(topic: str) -> tuple[str, str]:
+# ── Program email → program name mapping ──────────────────────────────────────
+# All programs share one Zoom account owner. Each program has its own
+# designated host email — this is the authoritative way to assign program.
+# Add new emails here if more programs are onboarded.
+PROGRAM_EMAIL_MAP = {
+    "aice@alxafrica.com":           "AiCE",
+    "vaprogram@alxafrica.com":      "Virtual Assistant",
+    "alxfoundations@alxafrica.com": "Professional Foundations",
+}
+
+
+def detect_program_and_event_type(host_email: str, topic: str, cohost_emails: list[str] = None) -> tuple[str, str]:
     """
-    Infer `program` and `event_type` from the meeting topic.
-    Adjust the keywords below to match your actual naming conventions.
+    Detects program from the meeting host or co-host email.
+
+    Priority order:
+      1. Host email matched against PROGRAM_EMAIL_MAP
+      2. Any co-host email matched against PROGRAM_EMAIL_MAP
+         (handles cases where a program's TM joins as co-host under a shared host account)
+      3. Topic keyword fallback (substitute host, guest session, etc.)
+      4. Default to AiCE with a WARNING log
+
+    Event type is still inferred from the meeting topic.
     """
+    # ── 1. Try host email first ───────────────────────────────────────────────
+    email_lower = (host_email or "").strip().lower()
+    program = PROGRAM_EMAIL_MAP.get(email_lower)
+
+    # ── 2. Try co-host emails if host didn't match ────────────────────────────
+    if not program and cohost_emails:
+        for cohost in cohost_emails:
+            cohost_lower = (cohost or "").strip().lower()
+            program = PROGRAM_EMAIL_MAP.get(cohost_lower)
+            if program:
+                print(f"[Zoom] Program detected from co-host email: {cohost_lower} → {program}")
+                break
+
+    # ── 3. Fallback: topic keywords ───────────────────────────────────────────
+    if not program:
+        topic_lower = topic.lower()
+        if any(k in topic_lower for k in ["aice", "ai career", "ai cohort", "tambali", "karibu"]):
+            program = "AiCE"
+        elif any(k in topic_lower for k in ["virtual assistant", "va c", "va cohort"]):
+            program = "Virtual Assistant"
+        elif any(k in topic_lower for k in ["professional foundations", "pro found"]):
+            program = "Professional Foundations"
+        else:
+            program = "AiCE"  # last-resort fallback
+            print(f"[Zoom] WARNING: Could not detect program from host '{host_email}', co-hosts {cohost_emails}, or topic '{topic}'. Defaulted to AiCE.")
+
+    # ── Event type detection: inferred from topic ─────────────────────────────
     topic_lower = topic.lower()
-
-    # ── Program detection ─────────────────────────────────────────────────────
-    if any(k in topic_lower for k in ["aice", "ai career", "ai community", "ai cohort", "tambali", "karibu", "portfolio office"]):
-        program = "AiCE"
-    elif any(k in topic_lower for k in ["virtual assistant", "va c", "va cohort", "va program"]):
-        program = "Virtual Assistant"
-    elif any(k in topic_lower for k in ["professional foundations", "pro found", "profound"]):
-        program = "Professional Foundations"
-    else:
-        program = "AiCE"  # default fallback — adjust if needed
-
-    # ── Event type detection ──────────────────────────────────────────────────
-    if any(k in topic_lower for k in ["office hour", "support session", "project clinic", "program team", "webinar"]):
+    if any(k in topic_lower for k in ["office hour", "support session", "project clinic", "learner support", "webinar"]):
         event_type = "Program Team"
-    elif any(k in topic_lower for k in ["mentorship", "mentor", "technical"]):
+    elif any(k in topic_lower for k in ["mentorship", "mentor", "technical mentor"]):
         event_type = "Technical Mentorship"
     else:
         event_type = "Community Event"
@@ -109,6 +143,13 @@ def collect_zoom_data(meeting_id: str, meeting_type: str = "meeting"):
     Fetches: participants (attendance_duration_mins) + poll results + survey results.
     Inserts one row per attendee into survey_events.
     """
+    # Wait 3 minutes before fetching.
+    # Surveys are launched DURING the session (before the host ends the call),
+    # so responses are mostly in by the time meeting.ended fires.
+    # However Zoom's reporting API lags 1–3 minutes after a meeting ends,
+    # so we wait to ensure participant records and all responses are finalised.
+    print(f"[Zoom] Queued — waiting 3 min for Zoom API to finalise data for {meeting_type} {meeting_id}...")
+    time.sleep(180)
     print(f"[Zoom] Starting data collection for {meeting_type} {meeting_id}")
     try:
         token = get_zoom_access_token()
@@ -119,24 +160,37 @@ def collect_zoom_data(meeting_id: str, meeting_type: str = "meeting"):
         topic      = details.get("topic", "Unnamed Session")
         start_time = details.get("start_time", datetime.utcnow().isoformat())
 
+        # host_email is the authoritative field for program detection.
+        # Zoom returns this as "host_email" on both meetings and webinars.
+        host_email = details.get("host_email", "")
+
         event_name_date = format_event_name_date(topic, start_time)
-        program, event_type = detect_program_and_event_type(topic)
+        # Initial detection with host email only — will be refined after
+        # participant report is fetched and co-host emails are known.
+        program, event_type = detect_program_and_event_type(host_email, topic)
+        print(f"[Zoom] Event: {event_name_date} | Initial program guess: {program}")
 
-        print(f"[Zoom] Event: {event_name_date} | Program: {program} | Type: {event_type}")
-
-        # ── 2. Get participant report (attendance duration per email) ──────────
+        # ── 2. Get participant report (attendance duration + co-host detection) ──
+        # Zoom participant roles: 1 = host, 2 = co-host, 0 = attendee
         participant_map: dict[str, int] = {}   # email → duration in minutes
+        cohost_emails: list[str] = []          # collected for program detection
         part_endpoint = "webinars" if meeting_type == "webinar" else "meetings"
         try:
             participants_resp = zoom_get(f"/report/{part_endpoint}/{meeting_id}/participants", token)
             for p in participants_resp.get("participants", []):
                 email = (p.get("user_email") or "").strip().lower()
-                duration = p.get("duration", 0)  # in seconds from report API
+                duration = p.get("duration", 0)  # seconds from report API
+                role = p.get("role", 0)
                 if email:
-                    # Zoom report API returns duration in seconds
                     participant_map[email] = round(duration / 60)
+                    if role == 2:  # co-host
+                        cohost_emails.append(email)
         except Exception as e:
             print(f"[Zoom] Warning: Could not fetch participants: {e}")
+
+        # Now that we have co-host emails, re-run program detection with full info
+        program, event_type = detect_program_and_event_type(host_email, topic, cohost_emails)
+        print(f"[Zoom] Final detection → Program: {program} | Type: {event_type} | Co-hosts found: {cohost_emails or 'none'}")
 
         # ── 3. Get poll results ────────────────────────────────────────────────
         # poll_map: email → {question_text: answer_text}
@@ -203,30 +257,55 @@ def collect_zoom_data(meeting_id: str, meeting_type: str = "meeting"):
                 "challenging_topic_text":      None,
             }
 
-            # ── Map question answers to your exact column names ────────────────
-            # The keys below are SUBSTRINGS of your actual Zoom question text.
-            # Edit them to match your real poll/survey question wording.
+            # ── Map question answers to survey_events columns ─────────────────
+            #
+            # Exact question text comes from your Feedback Collection Framework:
+            #
+            # BOTH event types:
+            #   "How would you rate today's session overall?"  → session_quality_csat (1–5 int)
+            #
+            # Learner Support Webinars only (Program Team):
+            #   "Did you understand the learning outcomes of this session?"
+            #       → understood_outcomes (bool: Yes/No)
+            #   "What is one thing that would make these sessions more useful for you?"
+            #       → improvement_suggestion_text (open text)
+            #   "Which module or topic do you find most challenging?"
+            #       → challenging_topic_text (open text)
+            #
+            # Community Events only:
+            #   "What is one thing that would have made this session more useful for you?"
+            #       → improvement_suggestion_text (open text)
+            #   (no understood_outcomes or challenging_topic questions for community events)
+            #
             for question_text, answer in combined.items():
-                q = question_text.lower()
+                q = question_text.lower().strip()
 
-                # session_quality_csat  — expects integer 1–5
-                if any(k in q for k in ["rate this session", "session quality", "how would you rate", "overall session"]):
+                # ── session_quality_csat  (1–5 integer) ───────────────────────
+                # Zoom returns rating scale answers as "1", "2" … "5"
+                if "how would you rate today" in q or "rate today's session" in q:
                     try:
                         row["session_quality_csat"] = int(str(answer).strip()[0])
                     except Exception:
                         pass
 
-                # understood_outcomes  — expects boolean
-                elif any(k in q for k in ["understood", "learning outcome", "understand the objective", "clear on what"]):
-                    row["understood_outcomes"] = str(answer).lower() in ["yes", "true", "1", "definitely", "absolutely"]
+                # ── understood_outcomes  (boolean, support sessions only) ──────
+                # Zoom returns Yes/No answers as the string "Yes" or "No"
+                elif "understand the learning outcome" in q or "did you understand" in q:
+                    row["understood_outcomes"] = str(answer).strip().lower() in ["yes", "true", "1"]
 
-                # improvement_suggestion_text  — open text
-                elif any(k in q for k in ["improve", "suggestion", "could be better", "what would make"]):
-                    row["improvement_suggestion_text"] = str(answer).strip() if answer else None
+                # ── improvement_suggestion_text  (open text) ──────────────────
+                # Handles both phrasings:
+                #   Support:   "What is one thing that would make these sessions more useful for you?"
+                #   Community: "What is one thing that would have made this session more useful for you?"
+                elif "one thing that would" in q and "useful" in q:
+                    val = str(answer).strip() if answer else None
+                    row["improvement_suggestion_text"] = val if val and val.lower() != "n/a" else None
 
-                # challenging_topic_text  — open text
-                elif any(k in q for k in ["challeng", "difficult", "hard to understand", "confus"]):
-                    row["challenging_topic_text"] = str(answer).strip() if answer else None
+                # ── challenging_topic_text  (open text, support sessions only) ─
+                # "Which module or topic do you find most challenging?"
+                elif "module or topic" in q or "most challenging" in q or "find most challeng" in q:
+                    val = str(answer).strip() if answer else None
+                    row["challenging_topic_text"] = val if val and val.lower() != "n/a" else None
 
             rows_to_insert.append(row)
 
