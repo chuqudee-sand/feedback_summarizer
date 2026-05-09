@@ -510,12 +510,22 @@ async def trigger_summary(req: SummaryRequest, background_tasks: BackgroundTasks
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 4 — HEALTH CHECK
+#  SECTION 4 — HEALTH CHECK & ROOT
 # ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/")
+async def root():
+    """Root route — satisfies Zoom's GET validation ping and Render's health checks."""
+    return {"status": "ok", "service": "ALX Feedback Engine"}
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.head("/")
+async def root_head():
+    """Render's internal health check uses HEAD / — this satisfies it."""
+    return {}
 
 
 if __name__ == "__main__":
