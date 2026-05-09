@@ -518,7 +518,6 @@ async def health():
     return {"status": "ok"}
 
 @app.route('/', methods=['GET'])
-@api_wrapper
 def health(): return jsonify({"status": "active", "version": "CA_Modular_SmartVacuum"})
 
 
