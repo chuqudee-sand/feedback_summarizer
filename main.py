@@ -407,6 +407,7 @@ def process_ai_summary(req: SummaryRequest):
     job_key = get_job_key(req)
     try:
         raw_text = ""
+        structured_context = ""
 
         if req.activeTab in ['onboarding', 'eop']:
             table = 'survey_onboarding' if req.activeTab == 'onboarding' else 'survey_eop'
@@ -426,35 +427,73 @@ def process_ai_summary(req: SummaryRequest):
                 .eq('program', req.program) \
                 .eq('event_name_date', req.activeEvent) \
                 .execute()
-            for row in response.data:
+            rows = response.data or []
+
+            # ── Build CSAT + outcomes structured summary ───────────────────────
+            total_rows = len(rows)
+            csat_responses = [r['session_quality_csat'] for r in rows if r.get('session_quality_csat') is not None]
+            csat_total     = len(csat_responses)
+            csat_high      = sum(1 for v in csat_responses if v >= 4)
+            csat_low       = sum(1 for v in csat_responses if v <= 2)
+            csat_pct       = round((csat_high / csat_total * 100), 1) if csat_total else 0
+            avg_csat       = round(sum(csat_responses) / csat_total, 2) if csat_total else 0
+
+            outcomes_responses = [r['understood_outcomes'] for r in rows if r.get('understood_outcomes') is not None]
+            outcomes_total     = len(outcomes_responses)
+            outcomes_yes       = sum(1 for v in outcomes_responses if v is True)
+            outcomes_pct       = round((outcomes_yes / outcomes_total * 100), 1) if outcomes_total else None
+
+            # ── Collect open-ended feedback text ──────────────────────────────
+            for row in rows:
                 for col in ['improvement_suggestion_text', 'challenging_topic_text']:
                     if row.get(col):
                         raw_text += f"Feedback: {row[col]}\n"
 
-        if len(raw_text.strip()) < 10:
-            print(f"[{job_key}] Not enough feedback text found.")
+            # ── Build structured context block for Gemini ──────────────────────
+            structured_context = f"""
+SESSION METRICS SUMMARY ({req.activeEvent}):
+- Total attendees: {total_rows}
+- CSAT responses: {csat_total} out of {total_rows} attendees
+- High satisfaction (4-5 rating): {csat_high} responses ({csat_pct}%)
+- Low satisfaction (1-2 rating): {csat_low} responses
+- Average CSAT score: {avg_csat} / 5.0
+"""
+            if outcomes_pct is not None:
+                structured_context += f"- Understood learning outcomes: {outcomes_yes}/{outcomes_total} ({outcomes_pct}%)\n"
+
+            if raw_text.strip():
+                structured_context += f"""
+OPEN-ENDED FEEDBACK RESPONSES:
+{raw_text[:15000]}"""
+
+        if not structured_context.strip() and len(raw_text.strip()) < 10:
+            print(f"[{job_key}] Not enough data found.")
             supabase.table("ai_summary_jobs").update({
                 "status": "failed",
-                "error_message": "Not enough learner feedback text found for this period."
+                "error_message": "Not enough learner feedback data found for this period."
             }).eq("job_key", job_key).execute()
             return
 
         model = genai.GenerativeModel('gemini-2.0-flash')
+
+        # Use structured context for events, raw text for onboarding/eop
+        analysis_input = structured_context if req.activeTab in ['community', 'support'] else raw_text[:20000]
+
         prompt = f"""
 You are an expert Data Analyst for a professional skills training program.
-Analyze the following learner feedback responses.
-Identify the 3 to 4 most prominent themes.
+Analyze the following session data and learner feedback.
+Identify the 3 to 4 most important insights or themes.
 
 Return the result STRICTLY as a valid JSON array of objects with NO markdown, NO backticks, NO extra text.
 
 Each object must have exactly these keys:
-- "theme_title": A short 2-4 word title for the theme (e.g. "Platform Navigation Issues")
-- "summary_text": A single sentence summarising what learners are saying about this theme
-- "response_count": An integer — your best estimate of how many responses mention this theme
-- "question_short": A short category label (e.g. "Improvement", "Positive Feedback", "Support Request")
+- "theme_title": A short 2-4 word title for the insight (e.g. "High Session Satisfaction", "Platform Navigation Issues")
+- "summary_text": A single sentence summarising the insight, referencing specific numbers where available
+- "response_count": An integer — number of responses this insight is based on
+- "question_short": A short category label (e.g. "CSAT", "Learning Outcomes", "Improvement", "Positive Feedback")
 
-Feedback to analyze:
-{raw_text[:20000]}
+Data to analyze:
+{analysis_input}
 """
         result = model.generate_content(prompt)
         response_text = result.text.strip()
