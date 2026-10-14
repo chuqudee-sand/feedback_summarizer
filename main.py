@@ -32,8 +32,10 @@ supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_
 HF_API_KEY   = os.getenv("HF_API_KEY")    # huggingface.co → Settings → Access Tokens
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # console.groq.com → API Keys
 
-HF_MODEL   = "mistralai/Mistral-7B-Instruct-v0.3"
-GROQ_MODEL = "llama3-70b-8192"
+# Model IDs are overridable from Render env vars, so when a provider retires a
+# model (as Groq did with llama3-70b-8192) you change a variable instead of code.
+HF_MODEL   = os.getenv("HF_MODEL",   "meta-llama/Llama-3.1-8B-Instruct")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 ZOOM_ACCOUNT_ID    = os.getenv("ZOOM_ACCOUNT_ID")
 ZOOM_CLIENT_ID     = os.getenv("ZOOM_CLIENT_ID")
@@ -374,71 +376,70 @@ Data to analyze:
 """
 
 
+def _post_chat(url: str, api_key: str, model: str, prompt: str, timeout: int) -> str:
+    """POST an OpenAI-style chat completion and return the text.
+    On HTTP errors, raises with the provider's own error message (status + body)
+    instead of httpx's generic '400 Bad Request', so failures are diagnosable."""
+    response = httpx.post(
+        url,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1024,
+            "temperature": 0.3,
+            "stream": False,
+        },
+        timeout=timeout,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP {response.status_code} (model={model}): {response.text[:300]}")
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
 def call_huggingface(prompt: str) -> str:
-    """Call Hugging Face Serverless Inference API — routes to HF's cloud,
-    no model download, no Render memory pressure."""
+    """Hugging Face Inference Providers router (OpenAI-compatible).
+    The legacy api-inference.huggingface.co endpoint is decommissioned."""
     if not HF_API_KEY:
         raise ValueError("HF_API_KEY not set")
-
-    url = f"https://api-inference.huggingface.co/models/{HF_MODEL}/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {HF_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": HF_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1024,
-        "temperature": 0.3,
-        "stream": False,
-    }
-    response = httpx.post(url, headers=headers, json=payload, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-    return data["choices"][0]["message"]["content"].strip()
+    return _post_chat("https://router.huggingface.co/v1/chat/completions", HF_API_KEY, HF_MODEL, prompt, timeout=60)
 
 
 def call_groq(prompt: str) -> str:
-    """Fallback: Groq inference API (Llama 3 70B). Ultra-fast, free tier.
-    Used automatically when Hugging Face is slow or unavailable.
-    Get a free key at console.groq.com"""
+    """Fallback: Groq (OpenAI-compatible). Fast, free tier."""
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY not set")
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1024,
-        "temperature": 0.3,
-    }
-    response = httpx.post(url, headers=headers, json=payload, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    return data["choices"][0]["message"]["content"].strip()
+    return _post_chat("https://api.groq.com/openai/v1/chat/completions", GROQ_API_KEY, GROQ_MODEL, prompt, timeout=30)
 
 
 def generate_summary(prompt: str) -> str:
-    """Tries Hugging Face first, falls back to Groq automatically.
-    Returns the raw text response from whichever provider succeeds."""
+    """Try Hugging Face first, fall back to Groq. If BOTH fail, the raised error
+    contains both reasons so the dashboard shows what actually went wrong."""
+    errors = []
+
     if HF_API_KEY:
         try:
-            print("[LLM] Trying Hugging Face (Mistral-7B)...")
+            print(f"[LLM] Trying Hugging Face ({HF_MODEL})...")
             result = call_huggingface(prompt)
-            print("[LLM] \u2705 Hugging Face responded successfully")
+            print("[LLM] Hugging Face responded successfully")
             return result
-        except Exception as hf_err:
-            print(f"[LLM] \u26a0\ufe0f  Hugging Face failed: {hf_err} \u2014 falling back to Groq")
+        except Exception as e:
+            print(f"[LLM] Hugging Face failed: {e}")
+            errors.append(f"Hugging Face: {e}")
 
     if GROQ_API_KEY:
         try:
-            print("[LLM] Trying Groq (Llama 3 70B)...")
+            print(f"[LLM] Trying Groq ({GROQ_MODEL})...")
             result = call_groq(prompt)
-            print("[LLM] \u2705 Groq responded successfully")
+            print("[LLM] Groq responded successfully")
             return result
-        except Exception as groq_err:
-            print(f"[LLM] \u274c Groq also failed: {groq_err}")
-            raise groq_err
+        except Exception as e:
+            print(f"[LLM] Groq failed: {e}")
+            errors.append(f"Groq: {e}")
 
-    raise ValueError("No LLM provider available \u2014 set HF_API_KEY or GROQ_API_KEY in environment variables")
+    if not errors:
+        raise ValueError("No LLM provider configured: set HF_API_KEY and/or GROQ_API_KEY on Render")
+    raise RuntimeError(" | ".join(errors))
 
 
 def process_ai_summary(req: SummaryRequest):
