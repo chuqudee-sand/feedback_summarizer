@@ -35,7 +35,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # console.groq.com → API Keys
 # Model IDs are overridable from Render env vars, so when a provider retires a
 # model (as Groq did with llama3-70b-8192) you change a variable instead of code.
 HF_MODEL   = os.getenv("HF_MODEL",   "meta-llama/Llama-3.1-8B-Instruct")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 ZOOM_ACCOUNT_ID    = os.getenv("ZOOM_ACCOUNT_ID")
 ZOOM_CLIENT_ID     = os.getenv("ZOOM_CLIENT_ID")
@@ -386,7 +386,7 @@ def _post_chat(url: str, api_key: str, model: str, prompt: str, timeout: int) ->
         json={
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1024,
+            "max_tokens": 4096,
             "temperature": 0.3,
             "stream": False,
         },
@@ -394,7 +394,12 @@ def _post_chat(url: str, api_key: str, model: str, prompt: str, timeout: int) ->
     )
     if response.status_code >= 400:
         raise RuntimeError(f"HTTP {response.status_code} (model={model}): {response.text[:300]}")
-    return response.json()["choices"][0]["message"]["content"].strip()
+    message = response.json()["choices"][0]["message"]
+    content = (message.get("content") or "").strip()
+    if not content:
+        # Reasoning models can spend the whole budget thinking and return nothing.
+        raise RuntimeError(f"empty reply from model={model} (token budget may be exhausted by reasoning)")
+    return content
 
 
 def call_huggingface(prompt: str) -> str:
