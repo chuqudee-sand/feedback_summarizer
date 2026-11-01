@@ -4,7 +4,8 @@ import hashlib
 import hmac
 import httpx
 from datetime import datetime
-from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
+from typing import Optional
+from fastapi import FastAPI, BackgroundTasks, Request, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -299,7 +300,22 @@ def process_pending_job(job: dict):
 #  giving Zoom's report API plenty of time to fully populate.
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/collect-zoom-data")
+# ── Shared-secret guard ────────────────────────────────────────────────────────
+# The dashboard (Vercel) sends this secret with every request to this backend.
+# Anyone who finds the Render URL but doesn't know the secret is turned away.
+# CORS alone can't do this: it only restricts browsers, not curl or scripts.
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
+
+
+def require_internal_secret(x_api_secret: Optional[str] = Header(default=None)):
+    # Fail closed: if the secret isn't configured on Render, nothing gets through.
+    if not INTERNAL_API_SECRET or not x_api_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not hmac.compare_digest(x_api_secret.encode(), INTERNAL_API_SECRET.encode()):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.get("/collect-zoom-data", dependencies=[Depends(require_internal_secret)])
 async def collect_zoom_data(background_tasks: BackgroundTasks):
     """
     Called by Render's cron job every hour.
@@ -550,7 +566,7 @@ SESSION METRICS SUMMARY ({req.activeEvent}):
             pass
 
 
-@app.post("/summarize")
+@app.post("/summarize", dependencies=[Depends(require_internal_secret)])
 async def trigger_summary(req: SummaryRequest, background_tasks: BackgroundTasks):
     job_key = get_job_key(req)
     supabase.table("ai_summary_jobs").upsert({
